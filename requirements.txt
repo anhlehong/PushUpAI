@@ -1,0 +1,6 @@
+fastdtw>=0.3.4
+mediapipe==0.10.11
+numpy>=2.4.4
+opencv-python-headless>=4.13.0.92
+scipy>=1.17.1
+streamlit>=1.56.0
