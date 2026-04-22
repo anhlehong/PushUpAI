@@ -8,7 +8,13 @@ class VideoProcessor:
     def __init__(self):
         self.engine = PoseEngine()
 
-    def process_video_lightweight(self, file_buffer):
+    def process_video_lightweight(
+        self,
+        file_buffer,
+        sample_interval_sec=1 / 30,
+        min_visibility=0.45,
+        min_keypoint_visibility=0.25,
+    ):
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
         file_buffer.seek(0)
         shutil.copyfileobj(file_buffer, tfile)
@@ -16,21 +22,59 @@ class VideoProcessor:
         tfile.close()
 
         cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+        fps = float(fps) if fps and fps > 1e-6 else 30.0
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
         data_list = []
         curr_frame_idx = 0
+        processed_frames = 0
+        valid_pose_frames = 0
+        conf_sum = 0.0
+        last_processed_ts = -1e9
+
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
-            if curr_frame_idx % 2 == 0:
-                # SỬA LỖI: Gọi đúng tên hàm extract_kinematics
+
+            timestamp = curr_frame_idx / fps
+            should_process = sample_interval_sec <= 0 or (
+                (timestamp - last_processed_ts) + 1e-9 >= sample_interval_sec
+            )
+            if should_process:
+                last_processed_ts = timestamp
+                processed_frames += 1
                 res, _ = self.engine.extract_kinematics(frame)
                 if res:
-                    res["frame_idx"] = curr_frame_idx
-                    data_list.append(res)
+                    frame_conf = res.get("landmark_confidence", {})
+                    conf_mean = float(frame_conf.get("mean", 0.0))
+                    conf_min = float(frame_conf.get("min", 0.0))
+                    if conf_mean >= min_visibility and conf_min >= min_keypoint_visibility:
+                        res["frame_idx"] = curr_frame_idx
+                        res["timestamp"] = timestamp
+                        data_list.append(res)
+                        valid_pose_frames += 1
+                        conf_sum += conf_mean
+
             curr_frame_idx += 1
+
         cap.release()
-        return data_list, video_path
+        total_frames = frame_count if frame_count > 0 else curr_frame_idx
+        duration_sec = total_frames / fps if fps > 1e-6 else 0.0
+
+        metadata = {
+            "fps": fps,
+            "total_frames": total_frames,
+            "video_duration_sec": duration_sec,
+            "processed_frames": processed_frames,
+            "valid_pose_frames": valid_pose_frames,
+            "valid_ratio": valid_pose_frames / max(processed_frames, 1),
+            "mean_confidence": conf_sum / max(valid_pose_frames, 1),
+            "sample_interval_sec": sample_interval_sec,
+            "processing_fps": 1.0 / sample_interval_sec if sample_interval_sec > 1e-9 else fps,
+        }
+        return data_list, video_path, metadata
 
     def get_frame(self, video_path, frame_idx):
         cap = cv2.VideoCapture(video_path)

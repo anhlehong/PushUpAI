@@ -1,0 +1,44 @@
+{
+  "case_id": "martial_arts_noise_case",
+  "description": "Non push-up martial arts video compared against correct push-up template.",
+  "expert_video": "Push-Up correct form.mp4",
+  "student_video": "video_vo_su.mp4",
+  "quality": {
+    "expert": {
+      "passed": true,
+      "reasons": [],
+      "metrics": {
+        "processed_frames": 306,
+        "valid_frames": 109,
+        "valid_ratio": 0.3562091503267974,
+        "mean_confidence": 0.9356685386380423,
+        "pushup_context_ratio": 1.0,
+        "torso_tilt_p50": 18.3314804437179,
+        "torso_tilt_p90": 24.283734062460635,
+        "fps": 30.0,
+        "duration_sec": 10.2
+      },
+      "camera_tip": "Use a diagonal side view (~45 deg), keep full body visible, distance about 1.8-2.0m."
+    },
+    "student": {
+      "passed": false,
+      "reasons": [
+        "Video lacks push-up context (too many standing/walking frames)."
+      ],
+      "metrics": {
+        "processed_frames": 1335,
+        "valid_frames": 768,
+        "valid_ratio": 0.5752808988764045,
+        "mean_confidence": 0.9172857766553096,
+        "pushup_context_ratio": 0.0,
+        "torso_tilt_p50": 88.70296873712189,
+        "torso_tilt_p90": 89.88271850542533,
+        "fps": 30.0,
+        "duration_sec": 44.5
+      },
+      "camera_tip": "Use a diagonal side view (~45 deg), keep full body visible, distance about 1.8-2.0m."
+    }
+  },
+  "status": "quality_gate_failed",
+  "message": "Session quality gate failed."
+}
