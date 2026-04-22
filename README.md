@@ -2,6 +2,14 @@
 
 Ứng dụng Streamlit phân tích video chống đẩy theo từng rep (rep-by-rep), so sánh video học viên với template chuẩn lấy từ video huấn luyện viên.
 
+## Cập nhật hiện tại
+
+- Video huấn luyện viên mặc định đã được khóa cứng là `push_up_template.mp4`.
+- Reference này được tiền xử lý trước bằng MediaPipe và lưu vào:
+  - `cache/expert_reference.pkl`
+  - `cache/expert_preview.mp4`
+- Khi chạy app, hệ thống chỉ nạp cache của video mẫu và chỉ xử lý video học viên để giảm thời gian chờ.
+
 ## 1) Source code nào tham gia workflow
 
 Workflow thực thi chỉ nằm ở các file:
@@ -18,6 +26,7 @@ Lưu ý:
 
 ```bash
 pip install -r requirements.txt
+.venv/bin/python scripts/precompute_reference.py --force
 streamlit run main.py
 ```
 

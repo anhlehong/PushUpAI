@@ -1,17 +1,4 @@
 from __future__ import annotations
-from src.similarity import (
-    FAULT_THRESHOLDS,
-    HYBRID_WEIGHTS,
-    analyze_rep_hybrid,
-    build_expert_templates,
-    estimate_sample_rate,
-    evaluate_session_quality,
-    filter_reps_by_quality,
-    segment_reps,
-    smooth_series,
-    summarize_top_faults,
-)
-from src.processor import VideoProcessor
 
 import argparse
 import json
@@ -27,22 +14,37 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from src.similarity import (
+    FAULT_THRESHOLDS,
+    FORM_WEIGHTS,
+    analyze_rep_hybrid,
+    detect_valid_reps,
+    estimate_sample_rate,
+    evaluate_session_quality,
+    summarize_top_faults,
+)
+from src.processor import VideoProcessor
+from src.reference import build_expert_reference_cache
+
+
+EXPERT_VIDEO_FILENAME = "push_up_template.mp4"
 
 CASE_DEFINITIONS = {
     "self_baseline": {
-        "expert": "Push-Up correct form.mp4",
-        "student": "Push-Up correct form.mp4",
-        "description": "Expert video compared with itself.",
+        "student": "push_up_template.mp4",
+        "description": "Template video compared with itself as the student upload.",
     },
     "neck_drop_case": {
-        "expert": "Push-Up correct form.mp4",
         "student": "Push-Up incorrect form.mp4",
         "description": "Incorrect form with neck drop toward end of rep.",
     },
     "core_brace_case": {
-        "expert": "Push-Up correct form.mp4",
         "student": "khong gong bung.mp4",
         "description": "Incorrect form with poor core bracing.",
+    },
+    "non_pushup_case": {
+        "student": "video_vo_su.mp4",
+        "description": "Non push-up video should be rejected before scoring.",
     },
 }
 
@@ -64,13 +66,20 @@ def _safe_mean(values: list[float]) -> float:
 
 
 def _json_safe(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
     if isinstance(value, dict):
         return {str(key): _json_safe(val) for key, val in value.items()}
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple, set)):
         return [_json_safe(item) for item in value]
+    if hasattr(value, "tolist"):
+        try:
+            return _json_safe(value.tolist())
+        except Exception:
+            pass
     if hasattr(value, "item"):
         try:
-            return value.item()
+            return _json_safe(value.item())
         except Exception:
             return str(value)
     return value
@@ -78,39 +87,41 @@ def _json_safe(value: Any) -> Any:
 
 def analyze_pair(
     processor: VideoProcessor,
-    expert_video: Path,
+    expert_ref: dict[str, Any],
     student_video: Path,
     case_id: str,
     case_description: str,
 ) -> dict[str, Any]:
-    ex_data = []
     st_data = []
-    ex_meta: dict[str, Any] = {}
     st_meta: dict[str, Any] = {}
-    ex_temp_path: str | None = None
     st_temp_path: str | None = None
 
     try:
-        ex_data, ex_temp_path, ex_meta = _process_video(
-            processor, expert_video)
         st_data, st_temp_path, st_meta = _process_video(
             processor, student_video)
 
-        ex_quality = evaluate_session_quality(ex_meta, ex_data)
         st_quality = evaluate_session_quality(st_meta, st_data)
 
         case_result: dict[str, Any] = {
             "case_id": case_id,
             "description": case_description,
-            "expert_video": expert_video.name,
+            "expert_video": expert_ref["video_name"],
             "student_video": student_video.name,
+            "expert_reference": {
+                "cache_status": expert_ref.get("cache_status"),
+                "rep_count": len(expert_ref.get("reps", [])),
+                "template_count": expert_ref.get("template_count", 0),
+            },
             "quality": {
-                "expert": ex_quality,
+                "expert": expert_ref["quality"],
                 "student": st_quality,
+            },
+            "rep_detection": {
+                "expert": expert_ref.get("rep_detection", {}),
             },
         }
 
-        if not ex_quality["passed"] or not st_quality["passed"]:
+        if not expert_ref["quality"]["passed"] or not st_quality["passed"]:
             case_result.update(
                 {
                     "status": "quality_gate_failed",
@@ -119,37 +130,16 @@ def analyze_pair(
             )
             return case_result
 
-        ex_timestamps = [frame.get("timestamp", 0.0) for frame in ex_data]
         st_timestamps = [frame.get("timestamp", 0.0) for frame in st_data]
 
-        ex_sample_rate = estimate_sample_rate(
-            ex_timestamps, ex_meta.get(
-                "processing_fps", ex_meta.get("fps", 30.0))
-        )
         st_sample_rate = estimate_sample_rate(
             st_timestamps, st_meta.get(
                 "processing_fps", st_meta.get("fps", 30.0))
         )
 
-        ex_angles = smooth_series([frame["elbow_angle"] for frame in ex_data])
-        st_angles = smooth_series([frame["elbow_angle"] for frame in st_data])
-
-        ex_reps = segment_reps(
-            ex_angles, timestamps=ex_timestamps, fps=ex_sample_rate)
-        st_reps = segment_reps(
-            st_angles, timestamps=st_timestamps, fps=st_sample_rate)
-
-        ex_reps = filter_reps_by_quality(ex_reps, ex_data, ex_sample_rate)
-        st_reps = filter_reps_by_quality(st_reps, st_data, st_sample_rate)
-
-        if not ex_reps:
-            case_result.update(
-                {
-                    "status": "no_expert_rep",
-                    "message": "No valid expert reps found.",
-                }
-            )
-            return case_result
+        st_reps, st_rep_debug = detect_valid_reps(
+            st_data, timestamps=st_timestamps, sample_rate=st_sample_rate)
+        case_result["rep_detection"]["student"] = st_rep_debug
 
         if not st_reps:
             case_result.update(
@@ -160,8 +150,7 @@ def analyze_pair(
             )
             return case_result
 
-        templates = build_expert_templates(
-            ex_data, ex_reps, ex_sample_rate, max_templates=3)
+        templates = expert_ref.get("templates", [])
         if not templates:
             case_result.update(
                 {
@@ -186,6 +175,8 @@ def analyze_pair(
                 {
                     "rep_num": rep_num,
                     "range": [int(start), int(end)],
+                    "form_score": float(rep_eval.get("form_score", 0.0)),
+                    "tempo_score": float(rep_eval.get("tempo_score", 0.0)),
                     "score_total": float(rep_eval.get("score_total", 0.0)),
                     "score_components": {
                         key: float(value)
@@ -199,22 +190,24 @@ def analyze_pair(
                 }
             )
 
-        total_scores = [rep["score_total"] for rep in rep_results]
+        total_scores = [rep["form_score"] for rep in rep_results]
         avg_components = {
             key: _safe_mean([rep["score_components"].get(key, 0.0)
                             for rep in rep_results])
-            for key in ["kinematic", "posture", "tempo", "stability"]
+            for key in ["kinematic", "posture", "stability"]
         }
+        avg_tempo_score = _safe_mean([rep["tempo_score"] for rep in rep_results])
         top_faults = summarize_top_faults(rep_results, top_k=5)
 
         case_result.update(
             {
                 "status": "ok",
-                "expert_rep_count": len(ex_reps),
+                "expert_rep_count": len(expert_ref.get("reps", [])),
                 "student_rep_count": len(st_reps),
                 "template_count": len(templates),
                 "overall_score": _safe_mean(total_scores),
                 "avg_components": avg_components,
+                "avg_tempo_score": avg_tempo_score,
                 "fault_counts": dict(fault_counter),
                 "top_faults": top_faults,
                 "rep_results": rep_results,
@@ -222,7 +215,7 @@ def analyze_pair(
         )
         return case_result
     finally:
-        for temp_path in (ex_temp_path, st_temp_path):
+        for temp_path in (st_temp_path,):
             if temp_path and os.path.exists(temp_path):
                 os.unlink(temp_path)
 
@@ -305,6 +298,26 @@ def evaluate_checks(cases: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         }
     )
 
+    core_rep_count = int(cases.get("core_brace_case", {}).get("student_rep_count", 0))
+    checks.append(
+        {
+            "name": "core_case_detects_most_reps",
+            "passed": core_rep_count >= 5,
+            "observed": core_rep_count,
+            "expected": ">= 5",
+        }
+    )
+
+    non_pushup_status = cases.get("non_pushup_case", {}).get("status", "missing")
+    checks.append(
+        {
+            "name": "non_pushup_case_rejected",
+            "passed": non_pushup_status in {"quality_gate_failed", "no_student_rep"},
+            "observed": non_pushup_status,
+            "expected": "quality_gate_failed or no_student_rep",
+        }
+    )
+
     return checks
 
 
@@ -317,18 +330,19 @@ def _to_markdown(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Cases")
     lines.append("")
-    lines.append("| Case | Status | Overall | Reps | Top faults |")
-    lines.append("|---|---|---:|---:|---|")
+    lines.append("| Case | Status | Form | Pace | Reps | Top faults |")
+    lines.append("|---|---|---:|---:|---:|---|")
 
     for case_id, result in report["cases"].items():
         if result.get("status") == "ok":
             top_fault_codes = [fault.get("code", "")
                                for fault in result.get("top_faults", [])]
             lines.append(
-                "| {case} | {status} | {score:.4f} | {reps} | {faults} |".format(
+                "| {case} | {status} | {score:.4f} | {pace:.4f} | {reps} | {faults} |".format(
                     case=case_id,
                     status=result.get("status"),
                     score=float(result.get("overall_score", 0.0)),
+                    pace=float(result.get("avg_tempo_score", 0.0)),
                     reps=int(result.get("student_rep_count", 0)),
                     faults=", ".join(
                         top_fault_codes) if top_fault_codes else "none",
@@ -336,7 +350,7 @@ def _to_markdown(report: dict[str, Any]) -> str:
             )
         else:
             lines.append(
-                "| {case} | {status} | - | - | - |".format(
+                "| {case} | {status} | - | - | - | - |".format(
                     case=case_id,
                     status=result.get("status", "missing"),
                 )
@@ -360,7 +374,7 @@ def _to_markdown(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Config Snapshot")
     lines.append("")
-    lines.append(f"- Hybrid weights: {report['config']['hybrid_weights']}")
+    lines.append(f"- Form weights: {report['config']['form_weights']}")
     lines.append(f"- Fault thresholds: {report['config']['fault_thresholds']}")
     lines.append("")
     return "\n".join(lines)
@@ -392,11 +406,11 @@ def write_report_files(report: dict[str, Any], log_dir: Path) -> dict[str, str]:
 
 
 def run_benchmark(write_logs: bool = True, log_dir: Path | None = None) -> dict[str, Any]:
-    processor = VideoProcessor()
     cases: dict[str, dict[str, Any]] = {}
+    expert_path = _video_path(EXPERT_VIDEO_FILENAME)
+    expert_ref = build_expert_reference_cache(expert_path, ROOT_DIR / "cache")
 
     for case_id, case_cfg in CASE_DEFINITIONS.items():
-        expert_path = _video_path(case_cfg["expert"])
         student_path = _video_path(case_cfg["student"])
 
         if not expert_path.exists() or not student_path.exists():
@@ -413,8 +427,8 @@ def run_benchmark(write_logs: bool = True, log_dir: Path | None = None) -> dict[
             continue
 
         cases[case_id] = analyze_pair(
-            processor,
-            expert_video=expert_path,
+            VideoProcessor(),
+            expert_ref=expert_ref,
             student_video=student_path,
             case_id=case_id,
             case_description=case_cfg["description"],
@@ -429,7 +443,7 @@ def run_benchmark(write_logs: bool = True, log_dir: Path | None = None) -> dict[
         "checks": checks,
         "all_checks_passed": all_passed,
         "config": {
-            "hybrid_weights": HYBRID_WEIGHTS,
+            "form_weights": FORM_WEIGHTS,
             "fault_thresholds": FAULT_THRESHOLDS,
         },
     }
@@ -448,10 +462,11 @@ def _print_summary(report: dict[str, Any]) -> None:
     for case_id, case in report["cases"].items():
         if case.get("status") == "ok":
             print(
-                "- {case}: status={status}, score={score:.4f}, reps={reps}, top_faults={faults}".format(
+                "- {case}: status={status}, form={score:.4f}, pace={pace:.4f}, reps={reps}, top_faults={faults}".format(
                     case=case_id,
                     status=case["status"],
                     score=float(case.get("overall_score", 0.0)),
+                    pace=float(case.get("avg_tempo_score", 0.0)),
                     reps=int(case.get("student_rep_count", 0)),
                     faults=[fault.get("code")
                             for fault in case.get("top_faults", [])],

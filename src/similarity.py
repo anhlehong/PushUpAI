@@ -4,12 +4,14 @@ from scipy.spatial.distance import euclidean
 from scipy.signal import find_peaks, savgol_filter
 
 
-HYBRID_WEIGHTS = {
-    "kinematic": 0.35,
-    "posture": 0.35,
-    "tempo": 0.15,
+FORM_WEIGHTS = {
+    "kinematic": 0.45,
+    "posture": 0.40,
     "stability": 0.15,
 }
+
+# Backward-compatible alias used by benchmark/report code.
+HYBRID_WEIGHTS = FORM_WEIGHTS.copy()
 
 PUSHUP_CONTEXT_THRESHOLDS = {
     "max_torso_tilt_deg": 55.0,
@@ -23,7 +25,7 @@ FAULT_THRESHOLDS = {
     "asymmetry_angle": 42.0,
     "hip_sag_offset": 0.11,
     "hip_pike_offset": -0.18,
-    "neck_min_angle": 118.0,
+    "neck_min_angle": 119.0,
     "elbow_flare_ratio": 0.62,
 }
 
@@ -119,21 +121,20 @@ def smooth_series(data):
     return savgol_filter(data, window, poly).tolist()
 
 
-def segment_reps(
+def _segment_reps_peak_based(
     angles,
     timestamps=None,
     fps=None,
     min_peak_distance_sec=0.45,
     min_rep_sec=0.5,
     max_rep_sec=6.0,
-    action_labels=None,  # New parameter for action labels
+    action_labels=None,
 ):
-    """Segment push-up reps with dynamic thresholds and time-based guards."""
     if len(angles) < 8:
         return []
 
     sample_rate = estimate_sample_rate(timestamps, fps_fallback=fps or 30.0)
-    inv_angles = 180 - np.array(angles)
+    inv_angles = 180 - np.array(angles, dtype=float)
 
     amp = float(np.percentile(inv_angles, 90) - np.percentile(inv_angles, 10))
     baseline = float(np.percentile(inv_angles, 50))
@@ -145,30 +146,169 @@ def segment_reps(
         inv_angles, height=peak_height, prominence=prominence, distance=distance
     )
     if len(peaks) == 0:
-        peaks, _ = find_peaks(inv_angles, prominence=max(
-            4.0, 0.1 * amp), distance=distance)
+        peaks, _ = find_peaks(
+            inv_angles,
+            prominence=max(4.0, 0.1 * amp),
+            distance=distance,
+        )
 
     reps = []
     for i, p in enumerate(peaks):
         left_limit = peaks[i - 1] if i > 0 else 0
-        right_limit = peaks[i +
-                            1] if i < len(peaks) - 1 else len(inv_angles) - 1
+        right_limit = peaks[i + 1] if i < len(peaks) - 1 else len(inv_angles) - 1
 
-        left_bound = left_limit + \
-            np.argmin(inv_angles[left_limit: p + 1]) if p > left_limit else 0
-        right_bound = p + \
-            np.argmin(inv_angles[p: right_limit + 1]
-                      ) if right_limit > p else len(inv_angles) - 1
+        left_bound = left_limit + np.argmin(inv_angles[left_limit: p + 1]) if p > left_limit else 0
+        right_bound = p + np.argmin(inv_angles[p: right_limit + 1]) if right_limit > p else len(inv_angles) - 1
 
-        # Filter segments based on action labels
+        duration = (
+            float(timestamps[right_bound] - timestamps[left_bound])
+            if timestamps is not None and right_bound < len(timestamps)
+            else (right_bound - left_bound) / max(sample_rate, 1e-6)
+        )
+        if duration < min_rep_sec or duration > max_rep_sec:
+            continue
+
         if action_labels:
             segment_action = action_labels[left_bound:right_bound]
             if "push_up" not in segment_action:
                 continue
 
-        reps.append((left_bound, right_bound))
-
+        reps.append((int(left_bound), int(right_bound)))
     return reps
+
+
+def _segment_reps_cycle_based(
+    angles,
+    timestamps=None,
+    fps=None,
+    min_peak_distance_sec=0.3,
+    min_rep_sec=0.35,
+    max_rep_sec=6.0,
+):
+    if len(angles) < 8:
+        return []
+
+    sample_rate = estimate_sample_rate(timestamps, fps_fallback=fps or 30.0)
+    angle_arr = np.asarray(angles, dtype=float)
+    angle_range = float(np.percentile(angle_arr, 90) - np.percentile(angle_arr, 10))
+    if angle_range < 4.0:
+        return []
+
+    bottom_distance = max(2, int(round(min_peak_distance_sec * sample_rate)))
+    top_distance = max(2, int(round(0.2 * sample_rate)))
+    bottom_prom = max(2.5, 0.08 * angle_range)
+    top_prom = max(2.0, 0.06 * angle_range)
+    min_cycle_drop = max(6.0, 0.14 * angle_range)
+
+    bottom_peaks, _ = find_peaks(
+        -angle_arr,
+        prominence=bottom_prom,
+        distance=bottom_distance,
+    )
+    top_peaks, _ = find_peaks(
+        angle_arr,
+        prominence=top_prom,
+        distance=top_distance,
+    )
+
+    top_candidates = np.unique(
+        np.concatenate(([0], top_peaks, [len(angle_arr) - 1]))
+    )
+
+    reps = []
+    for bottom_idx in bottom_peaks:
+        left_candidates = top_candidates[top_candidates < bottom_idx]
+        right_candidates = top_candidates[top_candidates > bottom_idx]
+        if len(left_candidates) == 0 or len(right_candidates) == 0:
+            continue
+
+        left_idx = int(left_candidates[-1])
+        right_idx = int(right_candidates[0])
+        if right_idx - left_idx < 3:
+            continue
+
+        top_level = min(float(angle_arr[left_idx]), float(angle_arr[right_idx]))
+        bottom_level = float(angle_arr[bottom_idx])
+        if (top_level - bottom_level) < min_cycle_drop:
+            continue
+
+        duration = (
+            float(timestamps[right_idx] - timestamps[left_idx])
+            if timestamps is not None and right_idx < len(timestamps)
+            else (right_idx - left_idx) / max(sample_rate, 1e-6)
+        )
+        if duration < min_rep_sec or duration > max_rep_sec:
+            continue
+
+        reps.append((left_idx, right_idx))
+    return reps
+
+
+def segment_reps(
+    angles,
+    timestamps=None,
+    fps=None,
+    min_peak_distance_sec=0.45,
+    min_rep_sec=0.5,
+    max_rep_sec=6.0,
+    action_labels=None,  # New parameter for action labels
+):
+    """Segment push-up reps with dynamic thresholds and time-based guards."""
+    peak_reps = _segment_reps_peak_based(
+        angles,
+        timestamps=timestamps,
+        fps=fps,
+        min_peak_distance_sec=min_peak_distance_sec,
+        min_rep_sec=min_rep_sec,
+        max_rep_sec=max_rep_sec,
+        action_labels=action_labels,
+    )
+    cycle_reps = _segment_reps_cycle_based(
+        angles,
+        timestamps=timestamps,
+        fps=fps,
+        min_peak_distance_sec=max(0.24, min_peak_distance_sec * 0.8),
+        min_rep_sec=min_rep_sec,
+        max_rep_sec=max_rep_sec,
+    )
+    return cycle_reps if len(cycle_reps) > len(peak_reps) else peak_reps
+
+
+def _rep_quality_metrics(rep_frames, sample_rate, context_thresholds=None):
+    th = PUSHUP_CONTEXT_THRESHOLDS.copy()
+    if context_thresholds:
+        th.update(context_thresholds)
+
+    if len(rep_frames) < 2:
+        return {
+            "duration_sec": 0.0,
+            "rom_deg": 0.0,
+            "confidence": 0.0,
+            "context_ratio": 0.0,
+        }
+
+    duration_from_samples = len(rep_frames) / max(sample_rate, 1e-6)
+    duration_from_timestamps = _rep_duration_sec(rep_frames, sample_rate)
+    if duration_from_timestamps > duration_from_samples * 1.6:
+        duration = duration_from_samples
+    else:
+        duration = max(duration_from_samples, duration_from_timestamps)
+    elbow_seq = np.array(
+        [f.get("elbow_angle", 180.0) for f in rep_frames],
+        dtype=float,
+    )
+    rom = float(np.max(elbow_seq) - np.min(elbow_seq)) if len(elbow_seq) else 0.0
+    conf = float(np.mean([
+        f.get("landmark_confidence", {}).get("mean", 0.0) for f in rep_frames
+    ]))
+    context_metrics = compute_pushup_context_metrics(rep_frames, thresholds=th)
+
+    return {
+        "duration_sec": duration,
+        "rom_deg": rom,
+        "confidence": conf,
+        "context_ratio": float(context_metrics["context_ratio"]),
+    }
 
 
 def filter_reps_by_quality(
@@ -181,45 +321,285 @@ def filter_reps_by_quality(
     min_rom_deg=12.0,
     context_thresholds=None,
 ):
-    th = PUSHUP_CONTEXT_THRESHOLDS.copy()
-    if context_thresholds:
-        th.update(context_thresholds)
-
     valid_reps = []
     for start, end in reps:
         rep_frames = data[start:end]
         if len(rep_frames) < 4:
             continue
 
-        duration = (end - start) / max(sample_rate, 1e-6)
-        if duration < min_duration_sec or duration > max_duration_sec:
+        metrics = _rep_quality_metrics(
+            rep_frames,
+            sample_rate,
+            context_thresholds=context_thresholds,
+        )
+        if metrics["duration_sec"] < min_duration_sec or metrics["duration_sec"] > max_duration_sec:
             continue
 
-        elbow_seq = np.array([f.get("elbow_angle", 180.0)
-                             for f in rep_frames], dtype=float)
-        rom = float(np.max(elbow_seq) - np.min(elbow_seq))
-        conf = float(np.mean([
-            f.get("landmark_confidence", {}).get("mean", 0.0) for f in rep_frames
-        ]))
-
-        context_metrics = compute_pushup_context_metrics(
-            rep_frames, thresholds=th)
-        context_ratio = context_metrics["context_ratio"]
-
         if (
-            rom >= min_rom_deg
-            and conf >= min_confidence
-            and context_ratio >= float(th["min_rep_context_ratio"])
+            metrics["rom_deg"] >= min_rom_deg
+            and metrics["confidence"] >= min_confidence
+            and metrics["context_ratio"] >= float(
+                (context_thresholds or {}).get(
+                    "min_rep_context_ratio",
+                    PUSHUP_CONTEXT_THRESHOLDS["min_rep_context_ratio"],
+                )
+            )
         ):
             valid_reps.append((start, end))
     return valid_reps
+
+
+def trim_data_to_reps_window(data, reps, sample_rate, padding_sec=0.45):
+    if not data or not reps:
+        return data, 0
+
+    pad = int(round(max(padding_sec, 0.0) * max(sample_rate, 1e-6)))
+    start = max(0, int(reps[0][0]) - pad)
+    end = min(len(data), int(reps[-1][1]) + pad)
+    return data[start:end], start
+
+
+def _rep_window_metrics(rep, data, sample_rate):
+    start, end = rep
+    rep_frames = data[start:end]
+    metrics = _rep_quality_metrics(rep_frames, sample_rate)
+    metrics["start"] = int(start)
+    metrics["end"] = int(end)
+    if rep_frames:
+        metrics["start_ts"] = float(rep_frames[0].get("timestamp", 0.0))
+        metrics["end_ts"] = float(rep_frames[-1].get("timestamp", metrics["start_ts"]))
+    else:
+        metrics["start_ts"] = 0.0
+        metrics["end_ts"] = 0.0
+    metrics["gap_after_sec"] = 0.0
+    return metrics
+
+
+def select_dense_rep_cluster(reps, data, sample_rate):
+    if len(reps) < 3:
+        return reps, {"clusters": [list(reps)], "gap_cutoff_sec": None}
+
+    rep_metrics = [_rep_window_metrics(rep, data, sample_rate) for rep in reps]
+    gaps = []
+    for idx in range(len(rep_metrics) - 1):
+        gap_sec = max(
+            0.0,
+            float(rep_metrics[idx + 1]["start_ts"] - rep_metrics[idx]["end_ts"]),
+        )
+        rep_metrics[idx]["gap_after_sec"] = gap_sec
+        gaps.append(gap_sec)
+
+    if not gaps:
+        return reps, {"clusters": [list(reps)], "gap_cutoff_sec": None}
+
+    median_gap = float(np.median(gaps))
+    median_duration = float(np.median([
+        metric["duration_sec"] for metric in rep_metrics if metric["duration_sec"] > 1e-6
+    ])) if rep_metrics else 0.0
+    gap_cutoff_sec = max(
+        median_gap * 1.6,
+        median_gap + min(0.45, median_duration * 0.35),
+    )
+
+    cluster_bounds = []
+    cluster_start = 0
+    for idx, gap_sec in enumerate(gaps, start=1):
+        if gap_sec > gap_cutoff_sec:
+            cluster_bounds.append((cluster_start, idx))
+            cluster_start = idx
+    cluster_bounds.append((cluster_start, len(reps)))
+
+    if len(cluster_bounds) == 1:
+        return reps, {
+            "clusters": [list(reps)],
+            "gap_cutoff_sec": float(gap_cutoff_sec),
+        }
+
+    def _cluster_score(bounds):
+        start_idx, end_idx = bounds
+        cluster_metrics = rep_metrics[start_idx:end_idx]
+        count = len(cluster_metrics)
+        mean_rom = float(np.mean([metric["rom_deg"] for metric in cluster_metrics]))
+        mean_conf = float(np.mean([metric["confidence"] for metric in cluster_metrics]))
+        total_duration = float(np.sum([metric["duration_sec"] for metric in cluster_metrics]))
+        return (
+            count,
+            mean_rom,
+            mean_conf,
+            total_duration,
+        )
+
+    best_start, best_end = max(cluster_bounds, key=_cluster_score)
+    return reps[best_start:best_end], {
+        "clusters": [list(reps[start:end]) for start, end in cluster_bounds],
+        "selected_cluster": [list(rep) for rep in reps[best_start:best_end]],
+        "gap_cutoff_sec": float(gap_cutoff_sec),
+    }
+
+
+def detect_valid_reps(
+    data,
+    timestamps=None,
+    sample_rate=None,
+    context_thresholds=None,
+):
+    if not data:
+        return [], {"passes": [], "selected_pass": None, "trim_offset": 0}
+
+    if timestamps is None:
+        timestamps = [frame.get("timestamp", 0.0) for frame in data]
+    if sample_rate is None:
+        sample_rate = estimate_sample_rate(timestamps, fps_fallback=30.0)
+
+    angles = smooth_series([frame.get("elbow_angle", 180.0) for frame in data])
+
+    passes = [
+        {
+            "name": "strict",
+            "segment": {
+                "min_peak_distance_sec": 0.45,
+                "min_rep_sec": 0.45,
+            },
+            "filter": {
+                "min_duration_sec": 0.45,
+                "max_duration_sec": 6.0,
+                "min_confidence": 0.45,
+                "min_rom_deg": 12.0,
+                "context_thresholds": context_thresholds,
+            },
+        },
+        {
+            "name": "balanced",
+            "segment": {
+                "min_peak_distance_sec": 0.34,
+                "min_rep_sec": 0.35,
+            },
+            "filter": {
+                "min_duration_sec": 0.4,
+                "max_duration_sec": 6.0,
+                "min_confidence": 0.42,
+                "min_rom_deg": 10.0,
+                "context_thresholds": {
+                    **(context_thresholds or {}),
+                    "min_rep_context_ratio": 0.5,
+                },
+            },
+        },
+        {
+            "name": "relaxed",
+            "segment": {
+                "min_peak_distance_sec": 0.28,
+                "min_rep_sec": 0.3,
+            },
+            "filter": {
+                "min_duration_sec": 0.35,
+                "max_duration_sec": 6.0,
+                "min_confidence": 0.38,
+                "min_rom_deg": 8.0,
+                "context_thresholds": {
+                    **(context_thresholds or {}),
+                    "min_rep_context_ratio": 0.45,
+                },
+            },
+        },
+        {
+            "name": "recovery",
+            "segment": {
+                "min_peak_distance_sec": 0.22,
+                "min_rep_sec": 0.25,
+            },
+            "filter": {
+                "min_duration_sec": 0.3,
+                "max_duration_sec": 6.0,
+                "min_confidence": 0.32,
+                "min_rom_deg": 6.0,
+                "context_thresholds": {
+                    **(context_thresholds or {}),
+                    "min_rep_context_ratio": 0.3,
+                },
+            },
+        },
+    ]
+
+    diagnostics = {"passes": [], "selected_pass": None, "trim_offset": 0}
+    best_reps = []
+    best_rank = (-1, -1.0)
+
+    for idx, cfg in enumerate(passes):
+        raw_reps = segment_reps(
+            angles,
+            timestamps=timestamps,
+            fps=sample_rate,
+            **cfg["segment"],
+        )
+        valid_reps = filter_reps_by_quality(
+            raw_reps,
+            data,
+            sample_rate,
+            **cfg["filter"],
+        )
+        clustered_reps, cluster_debug = select_dense_rep_cluster(
+            valid_reps,
+            data,
+            sample_rate,
+        )
+        avg_rom = 0.0
+        if clustered_reps:
+            avg_rom = float(np.mean([
+                _rep_quality_metrics(
+                    data[start:end],
+                    sample_rate,
+                    context_thresholds=cfg["filter"].get("context_thresholds"),
+                )["rom_deg"]
+                for start, end in clustered_reps
+            ]))
+
+        diagnostics["passes"].append(
+            {
+                "name": cfg["name"],
+                "raw_count": len(raw_reps),
+                "kept_count": len(valid_reps),
+                "clustered_count": len(clustered_reps),
+                "avg_rom_deg": avg_rom,
+                "cluster_debug": cluster_debug,
+            }
+        )
+
+        rank = (len(clustered_reps), avg_rom)
+        if rank > best_rank:
+            best_rank = rank
+            best_reps = clustered_reps
+            diagnostics["selected_pass"] = idx
+
+    if best_reps:
+        trimmed_data, offset = trim_data_to_reps_window(
+            data,
+            best_reps,
+            sample_rate,
+            padding_sec=0.45,
+        )
+        if offset > 0 and len(trimmed_data) >= 8:
+            trimmed_ts = [frame.get("timestamp", 0.0) for frame in trimmed_data]
+            trimmed_sr = estimate_sample_rate(trimmed_ts, fps_fallback=sample_rate)
+            trimmed_reps, trimmed_diag = detect_valid_reps(
+                trimmed_data,
+                timestamps=trimmed_ts,
+                sample_rate=trimmed_sr,
+                context_thresholds=context_thresholds,
+            )
+            mapped_trimmed = [(start + offset, end + offset) for start, end in trimmed_reps]
+            if len(mapped_trimmed) >= len(best_reps):
+                trimmed_diag["trim_offset"] += offset
+                return mapped_trimmed, trimmed_diag
+
+    return best_reps, diagnostics
 
 
 def evaluate_session_quality(
     metadata,
     data,
     min_processed_frames=25,
-    min_valid_ratio=0.33,
+    min_valid_ratio=0.29,
     min_mean_confidence=0.5,
     context_thresholds=None,
 ):
@@ -291,6 +671,22 @@ def _build_fault(code, severity):
     }
 
 
+def score_form(kinematic_score, posture_score, stability_score, weights=None):
+    w = FORM_WEIGHTS.copy()
+    if weights:
+        for key in FORM_WEIGHTS:
+            if key in weights:
+                w[key] = float(weights[key])
+
+    weight_sum = max(sum(w.values()), 1e-6)
+    total = (
+        w["kinematic"] * float(kinematic_score)
+        + w["posture"] * float(posture_score)
+        + w["stability"] * float(stability_score)
+    )
+    return _clamp01(total / weight_sum)
+
+
 def score_posture(rep_frames, thresholds=None):
     if not rep_frames:
         return 0.0, [], {}
@@ -319,6 +715,7 @@ def score_posture(rep_frames, thresholds=None):
         "hip_offset_p80": float(np.percentile(hip_offset, 80)),
         "hip_offset_p20": float(np.percentile(hip_offset, 20)),
         "neck_p10": float(np.percentile(neck, 10)),
+        "neck_p20": float(np.percentile(neck, 20)),
         "flare_p85": float(np.percentile(flare, 85)),
     }
 
@@ -342,8 +739,8 @@ def score_posture(rep_frames, thresholds=None):
         penalty += 0.14
 
     if metrics["neck_p10"] < th["neck_min_angle"]:
-        faults.append(_build_fault("head_drop", 0.55))
-        penalty += 0.12
+        faults.append(_build_fault("head_drop", 0.72))
+        penalty += 0.18
 
     if metrics["asymmetry_p85"] > th["asymmetry_angle"]:
         faults.append(_build_fault("asymmetry", 0.65))
@@ -461,10 +858,11 @@ def analyze_rep_hybrid(st_rep_frames, expert_templates, sample_rate, weights=Non
     if not st_rep_frames or not expert_templates:
         return {
             "score_total": 0.0,
+            "form_score": 0.0,
+            "tempo_score": 0.0,
             "score_components": {
                 "kinematic": 0.0,
                 "posture": 0.0,
-                "tempo": 0.0,
                 "stability": 0.0,
             },
             "faults": [],
@@ -500,16 +898,11 @@ def analyze_rep_hybrid(st_rep_frames, expert_templates, sample_rate, weights=Non
         "duration_sec", 0.0) if best_template else 0.0
     tempo_score = score_tempo(rep_duration, template_duration)
     stability_score = score_stability(st_rep_frames)
-
-    w = HYBRID_WEIGHTS.copy()
-    if weights:
-        w.update(weights)
-
-    total = (
-        w["kinematic"] * best_kinematic
-        + w["posture"] * posture_score
-        + w["tempo"] * tempo_score
-        + w["stability"] * stability_score
+    form_score = score_form(
+        best_kinematic,
+        posture_score,
+        stability_score,
+        weights=weights,
     )
 
     worst_pair = (0, 0)
@@ -523,11 +916,12 @@ def analyze_rep_hybrid(st_rep_frames, expert_templates, sample_rate, weights=Non
                 worst_pair = (st_idx, ex_idx)
 
     return {
-        "score_total": _clamp01(total),
+        "score_total": form_score,
+        "form_score": form_score,
+        "tempo_score": tempo_score,
         "score_components": {
             "kinematic": best_kinematic,
             "posture": posture_score,
-            "tempo": tempo_score,
             "stability": stability_score,
         },
         "faults": faults,
