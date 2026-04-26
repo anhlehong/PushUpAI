@@ -27,14 +27,32 @@ class PoseEngine:
             v1, v2 = p1 - p2, p3 - p2
             return np.degrees(np.arccos(np.clip(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)), -1.0, 1.0)))
 
-        # Đặc trưng 1: Góc khuỷu tay trung bình
-        elbow_angle = (get_angle_3d(
-            lms[11], lms[13], lms[15]) + get_angle_3d(lms[12], lms[14], lms[16])) / 2
+        # Tính toán riêng trái phải để đo độ lệch (Symmetry)
+        left_elbow = get_angle_3d(lms[11], lms[13], lms[15])
+        right_elbow = get_angle_3d(lms[12], lms[14], lms[16])
+        elbow_angle = (left_elbow + right_elbow) / 2
+        left_right_symmetry = abs(left_elbow - right_elbow)
 
-        # Đặc trưng 2: Độ sâu (Chiều dọc vai so với hông) - Quan trọng để khớp pha
+        # Đặc trưng 2: Độ sâu (Chiều dọc vai so với hông)
         shoulder_y = (lms[11][1] + lms[12][1]) / 2
         hip_y = (lms[23][1] + lms[24][1]) / 2
         depth_sig = shoulder_y - hip_y
+
+        # Góc hông trung bình (để kiểm tra lưng thẳng)
+        hip_angle = (get_angle_3d(lms[11], lms[23], lms[25]) + get_angle_3d(lms[12], lms[24], lms[26])) / 2
+
+        # Góc vai trung bình (Khuỷu tay - Vai - Hông)
+        shoulder_angle = (get_angle_3d(lms[13], lms[11], lms[23]) + get_angle_3d(lms[14], lms[12], lms[24])) / 2
+
+        # Góc đường cơ thể (Vai - Hông - Gót chân)
+        body_line_angle = (get_angle_3d(lms[11], lms[23], lms[29]) + get_angle_3d(lms[12], lms[24], lms[30])) / 2
+        
+        # Góc đầu (Tai - Vai - Hông)
+        head_angle = (get_angle_3d(lms[7], lms[11], lms[23]) + get_angle_3d(lms[8], lms[12], lms[24])) / 2
+
+        # Khoảng cách dọc Vai - Gót chân (Dùng cho lọc trạng thái đứng/plank)
+        heel_y = (lms[29][1] + lms[30][1]) / 2
+        shoulder_heel_y_dist = abs(shoulder_y - heel_y)
 
         # Chuẩn hóa Pose Embedding (Xoay và Scale về gốc Hông)
         hip_center = (lms[23] + lms[24]) / 2
@@ -44,6 +62,12 @@ class PoseEngine:
         return {
             "pose_embedding": norm_lms,
             "elbow_angle": elbow_angle,
+            "hip_angle": hip_angle,
+            "shoulder_angle": shoulder_angle,
+            "body_line_angle": body_line_angle,
+            "head_angle": head_angle,
+            "left_right_symmetry": left_right_symmetry,
             "depth_sig": depth_sig,
+            "shoulder_heel_y_dist": shoulder_heel_y_dist,
             "sig": [elbow_angle, depth_sig * 100]  # Signature đa đặc trưng
         }, results.pose_landmarks
