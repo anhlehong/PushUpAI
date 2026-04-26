@@ -26,8 +26,11 @@ class VideoProcessor:
                 # SỬA LỖI: Gọi đúng tên hàm extract_kinematics
                 res, _ = self.engine.extract_kinematics(frame)
                 if res:
-                    res["frame_idx"] = curr_frame_idx
-                    data_list.append(res)
+                    # Lọc trạng thái đứng (shoulder_heel_y_dist lớn)
+                    # Chỉ bắt đầu ghi nhận dữ liệu khi ở trạng thái Plank/Hít đất
+                    if res["shoulder_heel_y_dist"] < 0.4:
+                        res["frame_idx"] = curr_frame_idx
+                        data_list.append(res)
             curr_frame_idx += 1
         cap.release()
         return data_list, video_path
