@@ -1,0 +1,42 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+venv/
+ENV/
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Distribution / Packaging
+dist/
+build/
+*.egg-info/
+*.egg
+*.spec
+
+# Unit test / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs and Temporary files
+*.log
+logs/
+*.tmp
+*.bak
+*.Identifier
+
+# Media and Archives
+*.mp4
+*.zip
+*.tar.gz
