@@ -44,28 +44,43 @@ class PoseEngine:
         # Góc vai trung bình (Khuỷu tay - Vai - Hông)
         shoulder_angle = (get_angle_3d(lms[13], lms[11], lms[23]) + get_angle_3d(lms[14], lms[12], lms[24])) / 2
 
-        # Góc đường cơ thể (Vai - Hông - Gót chân)
-        body_line_angle = (get_angle_3d(lms[11], lms[23], lms[29]) + get_angle_3d(lms[12], lms[24], lms[30])) / 2
+        # Góc đường cơ thể (Vai - Hông - Mắt cá chân). Dùng max thay vì avg để khắc phục chân bị che khuất
+        body_line_angle = max(get_angle_3d(lms[11], lms[23], lms[27]), get_angle_3d(lms[12], lms[24], lms[28]))
         
-        # Góc đầu (Tai - Vai - Hông)
-        head_angle = (get_angle_3d(lms[7], lms[11], lms[23]) + get_angle_3d(lms[8], lms[12], lms[24])) / 2
+        # Góc đầu (Mắt - Vai - Hông)
+        head_angle = (get_angle_3d(lms[2], lms[11], lms[23]) + get_angle_3d(lms[5], lms[12], lms[24])) / 2
+
+        # Tính thêm Nose angle để debug
+        nose_angle = (get_angle_3d(lms[0], lms[11], lms[23]) + get_angle_3d(lms[0], lms[12], lms[24])) / 2
 
         # Khoảng cách dọc Vai - Gót chân (Dùng cho lọc trạng thái đứng/plank)
         heel_y = (lms[29][1] + lms[30][1]) / 2
         shoulder_heel_y_dist = abs(shoulder_y - heel_y)
 
-        # Chuẩn hóa Pose Embedding (Xoay và Scale về gốc Hông)
+        # Tính khoảng cách dọc giữa Tai và Vai (Âm = Đầu thấp hơn vai)
+        # Hệ trục toạ độ y hướng xuống dưới, y lớn = thấp hơn
+        ear_y = (lms[7][1] + lms[8][1]) / 2
+        ear_shoulder_y_diff = shoulder_y - ear_y # Dương = Đầu cao hơn vai, Âm = Đầu thấp hơn/Cúi gập
+
         hip_center = (lms[23] + lms[24]) / 2
         spine_dist = np.linalg.norm((lms[11]+lms[12])/2 - hip_center)
+        
+        # head_drop_norm: Khoảng cách đầu rơi xuống (Dương = đầu thấp hơn vai) chuẩn hoá theo lưng
+        head_drop_norm = (ear_y - shoulder_y) / (spine_dist if spine_dist > 0 else 1)
+
+        # Chuẩn hóa Pose Embedding (Xoay và Scale về gốc Hông)
         norm_lms = (lms - hip_center) / (spine_dist if spine_dist > 0 else 1)
 
         return {
             "pose_embedding": norm_lms,
             "elbow_angle": elbow_angle,
-            "hip_angle": hip_angle,
             "shoulder_angle": shoulder_angle,
+            "hip_angle": hip_angle,
             "body_line_angle": body_line_angle,
             "head_angle": head_angle,
+            "nose_angle": nose_angle,
+            "ear_shoulder_y_diff": ear_shoulder_y_diff,
+            "head_drop_norm": head_drop_norm,
             "left_right_symmetry": left_right_symmetry,
             "depth_sig": depth_sig,
             "shoulder_heel_y_dist": shoulder_heel_y_dist,

@@ -61,8 +61,10 @@ if st.button("🚀 PHÂN TÍCH TOÀN BỘ BÀI TẬP", use_container_width=True)
                     with st.expander(f"{emoji} Rep {rep['rep_num']} - Điểm: {rep['score']*100:.1f}% (Rule: {rep['rule_score']*100:.0f}%, DTW: {rep['dtw_score']*100:.0f}%)", expanded=is_bad_rep):
                         c1, c2 = st.columns(2)
                         
-                        img_st = processor.get_frame(st_path, st_data[rep["w_pair"][0]]["frame_idx"])
-                        img_ex = processor.get_frame(ex_path, ex_data[rep["w_pair"][1]]["frame_idx"])
+                        st_frame_data = st_data[rep["w_pair"][0]]
+                        ex_frame_data = ex_data[rep["w_pair"][1]]
+                        img_st = processor.get_frame(st_path, st_frame_data["frame_idx"], flip=st_frame_data.get("flipped", False))
+                        img_ex = processor.get_frame(ex_path, ex_frame_data["frame_idx"], flip=ex_frame_data.get("flipped", False))
                         
                         if is_bad_rep and rep["errors"]:
                             err = rep["errors"][0]
