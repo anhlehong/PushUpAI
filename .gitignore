@@ -37,6 +37,7 @@ logs/
 *.Identifier
 
 # Media and Archives
-*.mp4
+# *.mp4
+data/tests/
 *.zip
 *.tar.gz

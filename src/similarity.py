@@ -58,7 +58,9 @@ def compute_pose_similarity(v1, v2):
     weights[23:25] = 4.0  # Hông
     weights[25:27] = 2.0  # Đầu gối
     diff = (v1 - v2) * weights[:, np.newaxis]
-    return float(max(0, 1 - (np.linalg.norm(diff) / 9.0)))
+    # Divisor 18.0 để khoan dung với sự khác biệt tỷ lệ cơ thể
+    # giữa các người tập khác nhau (chiều cao, tay chân dài/ngắn)
+    return float(max(0, 1 - (np.linalg.norm(diff) / 18.0)))
 
 
 def align_and_score(st_rep_sigs, ex_template_sigs, st_rep_embeddings, ex_template_embeddings):
@@ -77,26 +79,30 @@ def align_and_score(st_rep_sigs, ex_template_sigs, st_rep_embeddings, ex_templat
 
 def check_is_valid_exercise(st_data, ex_template_embs):
     """
-    Kiểm tra nhanh xem video học viên có chứa tư thế giống bài tập không
-    bằng cách so sánh ngẫu nhiên các frame với tư thế chuẩn bị (frame đầu tiên của template).
+    Kiểm tra video học viên có chứa tư thế hít đất không.
+    So sánh TRUNG BÌNH similarity trên nhiều frame template (plank + bottom)
+    với nhiều frame học viên. Video không phải hít đất sẽ có average rất thấp.
     """
     if not st_data or not ex_template_embs:
         return False
-        
-    plank_pose = ex_template_embs[0]
-    
-    # Lấy mẫu 20 frame từ video học viên để quét nhanh
-    step = max(1, len(st_data) // 20)
+
+    # Lấy 3 frame đại diện từ template: đầu (plank), giữa (bottom), cuối (plank)
+    ref_indices = [0, len(ex_template_embs) // 2, len(ex_template_embs) - 1]
+    ref_poses = [ex_template_embs[i] for i in ref_indices]
+
+    # Lấy mẫu 30 frame từ video học viên
+    step = max(1, len(st_data) // 30)
     sample_embs = [st_data[i]["pose_embedding"] for i in range(0, len(st_data), step)]
-    
-    max_sim = 0
+
+    # Tính TRUNG BÌNH similarity cao nhất cho mỗi frame mẫu
+    avg_best_sims = []
     for emb in sample_embs:
-        sim = compute_pose_similarity(emb, plank_pose)
-        if sim > max_sim:
-            max_sim = sim
-            
-    # Nếu frame giống nhất với plank mà vẫn < 5% thì chắc chắn không phải đang tập hít đất
-    return max_sim > 0.05
+        best_sim = max(compute_pose_similarity(emb, ref) for ref in ref_poses)
+        avg_best_sims.append(best_sim)
+
+    avg_sim = np.mean(avg_best_sims)
+    # Video hít đất thật sẽ có avg >= 0.30. Video không liên quan < 0.30
+    return avg_sim >= 0.30
 
 
 def get_golden_template(ex_data, ex_reps):
